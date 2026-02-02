@@ -1,0 +1,768 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# EVE ARTIFACT VERIFICATION API — OpenAPI Specification
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# VERSION: 1.0.0
+# STATUS: CONTRACT (implementation follows)
+# DATE: 2026-01-24
+#
+# CRITICAL SEMANTIC RULES:
+#
+#   APPROVE ≠ SEAL
+#
+#   approve:
+#     - Human decision
+#     - Creates AUTHORIZATION_DECISION in X-Vault
+#     - Status: submitted → approved
+#     - Does NOT create snapshot
+#
+#   seal:
+#     - System sealing
+#     - Creates snapshot + Merkle root
+#     - Status: approved → verified
+#     - Only path to immutability
+#
+# STATE MACHINE (ENFORCED):
+#
+#   draft → submitted → approved → verified → superseded
+#
+#   - No skip (draft → verified BLOCKED)
+#   - No backward transitions
+#   - seal() ONLY on approved artifacts
+#
+# EVE VERIFIED:
+#
+#   "EVE Verified exposes proofs, not approvals."
+#
+#   - GET only
+#   - Never POST/PUT/DELETE
+#   - Never makes policy decisions
+#   - Read-only witness portal
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+openapi: 3.1.0
+
+info:
+  title: EVE Artifact Verification API
+  description: |
+    Artifact verification for EVE ecosystem.
+    
+    ## Critical Design Decision
+    
+    ```
+    APPROVE ≠ SEAL
+    
+    POST /approve  →  Human makes DECISION (FAS 5)
+    POST /seal     →  System SEALS artifact (FAS 6)
+    ```
+    
+    These are two distinct operations with different proof value.
+    
+    ## State Machine
+    
+    ```
+    draft → submitted → approved → verified → superseded
+    ```
+    
+    - No skip (draft → verified is BLOCKED)
+    - No backward transitions
+    - `seal()` can ONLY run on `approved` artifacts
+    
+    ## EVE Verified
+    
+    > "EVE Verified exposes proofs, not approvals."
+    
+    The `/verified/*` endpoints are READ-ONLY.
+    They expose proofs but never create them.
+    
+  version: 1.0.0
+  contact:
+    name: Organiq Sweden AB
+    email: api@eveverified.com
+    url: https://eveverified.com
+  license:
+    name: Proprietary
+    url: https://eveverified.com/license
+
+servers:
+  - url: http://127.0.0.1:8000
+    description: Trinity API (local development)
+  - url: https://api.eveverified.com
+    description: Production
+
+tags:
+  - name: Artifacts
+    description: |
+      Artifact lifecycle management.
+      
+      State machine: `draft → submitted → approved → verified → superseded`
+  - name: Verification
+    description: |
+      FAS 5 (approve) and FAS 6 (seal) operations.
+      
+      **approve** = Human decision, creates AUTHORIZATION_DECISION
+      
+      **seal** = System sealing, creates snapshot + Merkle root
+  - name: Verified
+    description: |
+      READ-ONLY endpoints for EVE Verified portal.
+      
+      > "EVE Verified exposes proofs, not approvals."
+      
+      These endpoints:
+      - Are GET only
+      - Never modify state
+      - Expose proofs for verification
+      - Are consumed by ComplieDocs
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PATHS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+paths:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ARTIFACT SUBMISSION
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  /artifacts:
+    post:
+      operationId: submitArtifact
+      tags: [Artifacts]
+      summary: Submit artifact for verification
+      description: |
+        Submit a new artifact for verification review.
+        
+        **State transition:** `draft → submitted`
+        
+        The artifact must have:
+        - Valid content
+        - Content hash computed
+        - Source information
+        
+        After submission, artifact is frozen and awaits approval.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactSubmitRequest'
+      responses:
+        '201':
+          description: Artifact submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactSubmitResponse'
+        '400':
+          description: Invalid request (missing required fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation failed (content hash mismatch, invalid type)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ARTIFACT APPROVAL (FAS 5)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  /artifacts/{artifact_id}/approve:
+    post:
+      operationId: approveArtifact
+      tags: [Verification]
+      summary: "FAS 5: Approve artifact (human decision)"
+      description: |
+        Approve an artifact for verification.
+        
+        **This is a HUMAN DECISION, not system sealing.**
+        
+        ## What this creates:
+        - `ApprovalRef` on artifact
+        - `AUTHORIZATION_DECISION` evidence in X-Vault
+        - `authorization_evidence_id` set
+        
+        ## What this does NOT create:
+        - Snapshot (that's `/seal`)
+        - Merkle root (that's `/seal`)
+        
+        **State transition:** `submitted → approved`
+        
+        ## Preconditions:
+        - Artifact must be in `submitted` status
+        - Approver must have `can_verify_trinity = true`
+        - Approver must have required role
+        
+        ## Error cases:
+        - 404: Artifact not found
+        - 409: Invalid state (not `submitted`)
+        - 403: Approver not authorized
+      parameters:
+        - $ref: '#/components/parameters/artifact_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalRequest'
+      responses:
+        '200':
+          description: Artifact approved (NOT sealed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResponse'
+        '403':
+          description: Approver not authorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: VERIFICATION_DENIED
+                message: "Approver does not have can_verify_trinity permission"
+        '404':
+          description: Artifact not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Invalid state transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: INVALID_STATE_TRANSITION
+                message: "Cannot approve artifact in 'draft' status. Must be 'submitted'."
+                current_status: draft
+                required_status: submitted
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ARTIFACT SEALING (FAS 6)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  /artifacts/{artifact_id}/seal:
+    post:
+      operationId: sealArtifact
+      tags: [Verification]
+      summary: "FAS 6: Seal artifact (system operation)"
+      description: |
+        Seal an approved artifact, making it immutable.
+        
+        **This is SYSTEM SEALING, not human decision.**
+        
+        ## What this creates:
+        - Snapshot in X-Vault
+        - Merkle root
+        - `KNOWLEDGE_PUBLISH` evidence
+        - `snapshot_id` and `merkle_root` set
+        - `verified_at` timestamp
+        
+        ## After seal:
+        - Artifact is IMMUTABLE
+        - Status is `verified`
+        - Can only be superseded, never modified
+        
+        **State transition:** `approved → verified`
+        
+        ## Preconditions:
+        - Artifact must be in `approved` status
+        - `approval_id` must exist
+        - `authorization_evidence_id` must exist
+        
+        ## Error cases:
+        - 404: Artifact not found
+        - 409: Invalid state (not `approved`)
+        - 409: Missing approval (seal precondition failed)
+      parameters:
+        - $ref: '#/components/parameters/artifact_id'
+      responses:
+        '200':
+          description: Artifact sealed and verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SealResponse'
+        '404':
+          description: Artifact not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Seal precondition failed or invalid state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_state:
+                  summary: Wrong status
+                  value:
+                    error: INVALID_STATE_TRANSITION
+                    message: "Cannot seal artifact in 'submitted' status. Must be 'approved'."
+                    current_status: submitted
+                    required_status: approved
+                missing_approval:
+                  summary: No approval exists
+                  value:
+                    error: SEAL_PRECONDITION_FAILED
+                    message: "Cannot seal: artifact has no approval_id"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EVE VERIFIED — READ-ONLY
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  /verified/artifacts:
+    get:
+      operationId: getVerifiedArtifacts
+      tags: [Verified]
+      summary: Get verified artifacts (READ-ONLY)
+      description: |
+        Get all verified artifacts for consumption.
+        
+        > "EVE Verified exposes proofs, not approvals."
+        
+        **This endpoint is READ-ONLY.**
+        
+        Returns only artifacts with status `verified`.
+        
+        Used by ComplieDocs to pull verified content.
+      parameters:
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/ArtifactType'
+          description: Filter by artifact type
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Return artifacts verified after this timestamp
+        - name: domain
+          in: query
+          schema:
+            type: string
+          description: Filter by domain (future use)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+          description: Maximum number of results
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Pagination cursor
+      responses:
+        '200':
+          description: List of verified artifacts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifiedArtifactsResponse'
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+components:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PARAMETERS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  parameters:
+    artifact_id:
+      name: artifact_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Z]+-\d{4}-\d{6}$'
+        example: "KNOWLEDGE-2026-000001"
+      description: |
+        Artifact ID in format `TYPE-YYYY-XXXXXX`
+        
+        Examples:
+        - `KNOWLEDGE-2026-000001`
+        - `TEMPLATE-2026-000042`
+        - `RULE-2026-000003`
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SCHEMAS — ENUMS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  schemas:
+
+    ArtifactType:
+      type: string
+      enum:
+        - knowledge
+        - rule
+        - template
+        - code
+        - workflow
+      description: |
+        Type of artifact.
+        
+        - `knowledge`: Regulatory/legal knowledge (EUR-Lex, etc.)
+        - `rule`: Business rules
+        - `template`: ComplieDocs templates
+        - `code`: Verified code
+        - `workflow`: Process definitions
+
+    ArtifactStatus:
+      type: string
+      enum:
+        - draft
+        - submitted
+        - approved
+        - verified
+        - superseded
+        - revoked
+      description: |
+        Artifact lifecycle status.
+        
+        **State machine (ENFORCED):**
+        
+        ```
+        draft → submitted → approved → verified → superseded
+        ```
+        
+        **Invariants:**
+        - `submitted`: requires `content_hash`
+        - `approved`: requires `approval_id` + `authorization_evidence_id`
+        - `verified`: requires `snapshot_id` + `merkle_root` + `verified_at`
+        - `superseded`: requires `superseded_by`
+        
+        **Rules:**
+        - No skip (draft → verified BLOCKED)
+        - No backward transitions
+        - `seal()` ONLY on `approved` artifacts
+
+    ApproverRole:
+      type: string
+      enum:
+        - founder
+        - legal_reviewer
+        - technical_reviewer
+        - compliance_officer
+      description: Role required for approval
+
+    IdentityStrength:
+      type: string
+      enum:
+        - founder_approved
+        - organization_idp
+        - bankid_se
+        - eidas_substantial
+        - eidas_high
+      description: Identity verification level
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # SCHEMAS — REQUEST/RESPONSE
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    ArtifactSubmitRequest:
+      type: object
+      required:
+        - type
+        - version
+        - title
+        - content
+        - source
+      properties:
+        type:
+          $ref: '#/components/schemas/ArtifactType'
+        version:
+          type: string
+          example: "v1"
+        title:
+          type: string
+          example: "AI Act Article 14 - Human Oversight"
+        content:
+          type: object
+          description: Artifact content (structure depends on type)
+        source:
+          type: object
+          required:
+            - origin
+            - author
+          properties:
+            origin:
+              type: string
+              example: "EVE_CONTROL_ROOM"
+            author:
+              type: string
+              format: email
+              example: "user@example.com"
+        domains:
+          type: array
+          items:
+            type: string
+          description: Domain tags (future use, e.g., medical, finance)
+          default: []
+        scope:
+          type: array
+          items:
+            type: string
+          description: Scope tags (future use)
+          default: []
+
+    ArtifactSubmitResponse:
+      type: object
+      required:
+        - artifact_id
+        - status
+        - content_hash
+        - created_at
+      properties:
+        artifact_id:
+          type: string
+          example: "KNOWLEDGE-2026-000001"
+        status:
+          $ref: '#/components/schemas/ArtifactStatus'
+          example: submitted
+        content_hash:
+          type: string
+          description: SHA-256 of content
+          example: "a1b2c3d4e5f6..."
+        created_at:
+          type: string
+          format: date-time
+
+    ApprovalRequest:
+      type: object
+      required:
+        - approver_id
+        - role
+        - signature
+      properties:
+        approver_id:
+          type: string
+          description: Approver identifier (e.g., "key:founder_joakim")
+          example: "key:founder_joakim"
+        role:
+          $ref: '#/components/schemas/ApproverRole'
+        signature:
+          type: string
+          description: Cryptographic signature
+        notes:
+          type: string
+          description: Optional approval notes
+
+    ApprovalResponse:
+      type: object
+      description: |
+        Response from approve operation.
+        
+        **Note:** This does NOT include `snapshot_id` or `merkle_root`.
+        Those are created by `/seal`, not `/approve`.
+      required:
+        - approval_id
+        - artifact_id
+        - status
+        - x_vault_evidence_id
+      properties:
+        approval_id:
+          type: string
+          example: "APPROVAL-2026-000001"
+        artifact_id:
+          type: string
+          example: "KNOWLEDGE-2026-000001"
+        artifact_hash:
+          type: string
+          description: Hash of artifact at approval time
+        approver_id:
+          type: string
+        approver_name:
+          type: string
+        role:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        signature:
+          type: string
+        x_vault_evidence_id:
+          type: string
+          description: X-Vault evidence ID (AUTHORIZATION_DECISION)
+        status:
+          $ref: '#/components/schemas/ArtifactStatus'
+          example: approved
+          description: |
+            Status after approval.
+            
+            **Always `approved`, never `verified`.**
+            
+            Sealing (→ `verified`) requires separate `/seal` call.
+
+    SealResponse:
+      type: object
+      description: |
+        Response from seal operation.
+        
+        **This creates the snapshot and Merkle root.**
+        
+        After seal, artifact is IMMUTABLE.
+      required:
+        - artifact_id
+        - snapshot_id
+        - merkle_root
+        - status
+        - sealed_at
+      properties:
+        artifact_id:
+          type: string
+          example: "KNOWLEDGE-2026-000001"
+        snapshot_id:
+          type: string
+          description: X-Vault snapshot ID
+          example: "SNAPSHOT-2026-000001"
+        merkle_root:
+          type: string
+          description: Merkle tree root hash
+          example: "0xabc123..."
+        x_vault_evidence_id:
+          type: string
+          description: X-Vault evidence ID (KNOWLEDGE_PUBLISH)
+        sealed_at:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/ArtifactStatus'
+          example: verified
+          description: |
+            Status after seal.
+            
+            **Always `verified`.**
+            
+            Artifact is now IMMUTABLE.
+
+    VerifiedArtifactsResponse:
+      type: object
+      description: |
+        READ-ONLY response of verified artifacts.
+        
+        > "EVE Verified exposes proofs, not approvals."
+      properties:
+        artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/VerifiedArtifact'
+        pagination:
+          type: object
+          properties:
+            next_cursor:
+              type: string
+              nullable: true
+            has_more:
+              type: boolean
+
+    VerifiedArtifact:
+      type: object
+      description: A verified artifact (status = verified)
+      properties:
+        artifact_id:
+          type: string
+        type:
+          $ref: '#/components/schemas/ArtifactType'
+        version:
+          type: string
+        title:
+          type: string
+        content_hash:
+          type: string
+        status:
+          $ref: '#/components/schemas/ArtifactStatus'
+          example: verified
+        approval:
+          type: object
+          properties:
+            approval_id:
+              type: string
+            approver_id:
+              type: string
+            role:
+              type: string
+            approved_at:
+              type: string
+              format: date-time
+        x_vault:
+          type: object
+          properties:
+            authorization_evidence_id:
+              type: string
+              description: From approve (FAS 5)
+            snapshot_id:
+              type: string
+              description: From seal (FAS 6)
+            merkle_root:
+              type: string
+              description: From seal (FAS 6)
+        verified_at:
+          type: string
+          format: date-time
+        domains:
+          type: array
+          items:
+            type: string
+          description: Domain tags (future use)
+        scope:
+          type: array
+          items:
+            type: string
+          description: Scope tags (future use)
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # SCHEMAS — ERRORS
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - VERIFICATION_DENIED
+            - INVALID_STATE_TRANSITION
+            - SEAL_PRECONDITION_FAILED
+            - ARTIFACT_NOT_FOUND
+            - INVARIANT_VIOLATION
+            - BAD_REQUEST
+          description: |
+            Error codes:
+            
+            - `VERIFICATION_DENIED`: Approver not authorized
+            - `INVALID_STATE_TRANSITION`: Wrong status for operation
+            - `SEAL_PRECONDITION_FAILED`: Missing approval for seal
+            - `ARTIFACT_NOT_FOUND`: Artifact does not exist
+            - `INVARIANT_VIOLATION`: State machine invariant broken
+            - `BAD_REQUEST`: Malformed request
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          description: Additional error context
+          properties:
+            current_status:
+              type: string
+            required_status:
+              type: string
+            missing_field:
+              type: string

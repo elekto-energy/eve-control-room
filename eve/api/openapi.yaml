@@ -1,0 +1,1208 @@
+openapi: 3.0.3
+info:
+  title: EVE Verified API
+  description: |
+    Centralized verification platform for EVE ecosystem artifacts.
+    
+    ## Core Principle
+    
+    > "I EVE existerar inget förrän det är formellt godkänt, 
+    > kryptografiskt signerat och verifierbart i efterhand."
+    
+    ## Critical Design Decision
+    
+    ```
+    APPROVE ≠ SEAL
+    
+    POST /approve  →  Human makes DECISION (FAS 5)
+    POST /seal     →  System SEALS artifact (FAS 6)
+    ```
+    
+    These are two distinct operations with different proof value.
+    
+    ## State Machine
+    
+    ```
+    draft → submitted → approved → verified → superseded
+    ```
+    
+    - No skipping steps allowed
+    - No backward transitions
+    - Invariants enforced at each state
+    
+    ## Trust Model
+    
+    Founder-approved trust model:
+    - Founder is root of trust
+    - Only `can_verify_trinity=true` users can approve
+    - Identity strength is an attribute, can be upgraded later
+    
+  version: 2.0.0
+  contact:
+    name: Organiq Sweden AB
+    email: api@eveverified.com
+    url: https://eveverified.com
+  license:
+    name: Proprietary
+    url: https://eveverified.com/license
+
+servers:
+  - url: https://api.eveverified.com/v1
+    description: Production
+  - url: https://api.staging.eveverified.com/v1
+    description: Staging
+  - url: http://localhost:8000/v1
+    description: Local development
+
+tags:
+  - name: Artifacts
+    description: Artifact lifecycle management
+  - name: Verification
+    description: FAS 5 (Approve) and FAS 6 (Seal) operations
+  - name: Query
+    description: Verification and trust chain queries
+  - name: Approvers
+    description: Approver registry management
+  - name: Export
+    description: Regulator packages and bulk export
+  - name: ComplieDocs
+    description: ComplieDocs integration endpoints
+
+paths:
+  # ===========================================================================
+  # ARTIFACTS
+  # ===========================================================================
+  /artifacts:
+    post:
+      tags: [Artifacts]
+      operationId: submitArtifact
+      summary: Submit artifact for verification
+      description: |
+        Submit a draft artifact for verification review.
+        
+        **Transition:** `draft` → `submitted`
+        
+        **Requirements:**
+        - Content will be hashed automatically
+        - Source information required
+        
+        **Invariants enforced:**
+        - `content_hash` will be computed and set
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactSubmitRequest'
+            example:
+              type: knowledge
+              version: v1
+              title: "AI Act Article 14 - Human Oversight"
+              content:
+                body: "According to Article 14..."
+                source_refs:
+                  - type: eurlex
+                    celex: "32024R1689"
+                    article: "14"
+              source:
+                origin: EVE_CONTROL_ROOM
+                author: user@example.com
+      responses:
+        '201':
+          description: Artifact submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactSubmitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      tags: [Artifacts]
+      operationId: listArtifacts
+      summary: List artifacts
+      description: List artifacts with optional filters
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ArtifactStatus'
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/ArtifactType'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of artifacts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactListResponse'
+
+  /artifacts/{artifact_id}:
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      summary: Get artifact by ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200':
+          description: Artifact details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Artifact'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===========================================================================
+  # VERIFICATION (FAS 5 + FAS 6)
+  # ===========================================================================
+  /artifacts/{artifact_id}/approve:
+    post:
+      tags: [Verification]
+      operationId: approveArtifact
+      summary: "FAS 5: Approve artifact"
+      description: |
+        Approve an artifact for verification.
+        
+        **Transition:** `submitted` → `approved`
+        
+        **Requirements:**
+        - Artifact must be in `submitted` status
+        - Approver must have `can_verify_trinity=true`
+        - Approver must have the required role
+        
+        **Creates:**
+        - `ApprovalRef` on artifact
+        - `AUTHORIZATION_DECISION` evidence in X-Vault
+        
+        **Does NOT create:**
+        - Snapshot (that's done by `/seal`)
+        - Merkle root
+        
+        This is a DECISION, not a seal. The artifact remains mutable
+        until `/seal` is called.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+        - $ref: '#/components/parameters/ApproverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalRequest'
+            example:
+              role: legal_reviewer
+              signature: "sha256:9f3a7d2b..."
+              notes: "Verified against EUR-Lex source document"
+      responses:
+        '200':
+          description: Artifact approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResult'
+        '403':
+          description: Not authorized to approve
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: VERIFICATION_DENIED
+                message: "Approver does not have Trinity verification rights"
+        '409':
+          description: Invalid state transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: INVALID_STATE_TRANSITION
+                message: "Cannot approve artifact with status 'draft'. Expected: 'submitted'"
+
+  /artifacts/{artifact_id}/seal:
+    post:
+      tags: [Verification]
+      operationId: sealArtifact
+      summary: "FAS 6: Seal artifact"
+      description: |
+        Seal an approved artifact, making it immutable.
+        
+        **Transition:** `approved` → `verified`
+        
+        **Requirements:**
+        - Artifact must be in `approved` status
+        - Artifact must have approval
+        
+        **Creates:**
+        - Snapshot in X-Vault
+        - Merkle root
+        - `KNOWLEDGE_PUBLISH` evidence
+        
+        **After seal:**
+        - Artifact is IMMUTABLE
+        - Can only be superseded, never modified
+        
+        This is a SYSTEM operation that freezes the artifact.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200':
+          description: Artifact sealed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SealResult'
+        '409':
+          description: Cannot seal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                wrong_status:
+                  summary: Wrong status
+                  value:
+                    error: INVALID_STATE_TRANSITION
+                    message: "Cannot seal artifact with status 'submitted'. Expected: 'approved'"
+                no_approval:
+                  summary: Missing approval
+                  value:
+                    error: SEAL_PRECONDITION_FAILED
+                    message: "Artifact has no approval - must be approved first"
+
+  /artifacts/{artifact_id}/reject:
+    post:
+      tags: [Verification]
+      operationId: rejectArtifact
+      summary: Reject artifact
+      description: |
+        Reject an artifact with a reason.
+        
+        **Note:** Artifact remains in `submitted` status and can be 
+        fixed and resubmitted. Rejection is logged in X-Vault for audit.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+        - $ref: '#/components/parameters/ApproverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectRequest'
+      responses:
+        '200':
+          description: Artifact rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RejectResult'
+
+  /artifacts/{artifact_id}/supersede:
+    post:
+      tags: [Verification]
+      operationId: supersedeArtifact
+      summary: "FAS 8: Supersede artifact"
+      description: |
+        Replace a verified artifact with a newer version.
+        
+        **Transition:** `verified` → `superseded`
+        
+        **Requirements:**
+        - Old artifact must be `verified`
+        - New artifact must be `verified`
+        
+        **Important:**
+        - Old artifact remains verifiable
+        - Old artifact never loses proof value
+        - Lineage is tracked
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+        - $ref: '#/components/parameters/ApproverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SupersedeRequest'
+      responses:
+        '200':
+          description: Artifact superseded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupersedeResult'
+
+  # ===========================================================================
+  # QUERY
+  # ===========================================================================
+  /artifacts/{artifact_id}/verify:
+    get:
+      tags: [Query]
+      operationId: verifyArtifact
+      summary: Verify artifact integrity
+      description: |
+        Verify an artifact's integrity and approval chain.
+        
+        **Offline-capable:** Response includes all data needed for 
+        offline verification.
+        
+        **Checks performed:**
+        - Status is `verified`
+        - Content hash matches
+        - Approval exists and is signed
+        - Approver was authorized
+        - Snapshot exists
+        - Merkle root exists
+        - All invariants valid
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyResult'
+
+  /artifacts/{artifact_id}/trust-chain:
+    get:
+      tags: [Query]
+      operationId: getTrustChain
+      summary: Get complete trust chain
+      description: |
+        Get the complete trust chain for an artifact, from the artifact
+        back to the root of trust (founder).
+        
+        **Includes:**
+        - Artifact details
+        - Approval information
+        - Approver chain (who approved the approver)
+        - X-Vault evidence references
+        - Root of trust identifier
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200':
+          description: Trust chain
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustChain'
+
+  # ===========================================================================
+  # APPROVERS
+  # ===========================================================================
+  /approvers:
+    get:
+      tags: [Approvers]
+      operationId: listApprovers
+      summary: List authorized approvers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: can_verify
+          in: query
+          description: Filter by Trinity verification rights
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: List of approvers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApproverListResponse'
+
+    post:
+      tags: [Approvers]
+      operationId: grantTrinityAccess
+      summary: Grant Trinity verification access
+      description: |
+        Grant a new person Trinity verification rights.
+        
+        **Requires:** Founder privileges
+        
+        Only the founder can grant Trinity access.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApproverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantAccessRequest'
+      responses:
+        '201':
+          description: Access granted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approver'
+        '403':
+          description: Only founder can grant access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: FOUNDER_REQUIRED
+                message: "Only founder can grant Trinity access"
+
+  # ===========================================================================
+  # COMPLIEDOCS
+  # ===========================================================================
+  /verified/artifacts:
+    get:
+      tags: [ComplieDocs]
+      operationId: getVerifiedArtifacts
+      summary: Get verified artifacts for ComplieDocs
+      description: |
+        Get only `verified` artifacts for consumption by ComplieDocs.
+        
+        **Important:** This endpoint ONLY returns verified artifacts.
+        ComplieDocs should NEVER access draft, submitted, or approved 
+        artifacts.
+      security:
+        - serviceAuth: []
+      parameters:
+        - name: since
+          in: query
+          description: Only return artifacts verified after this date
+          schema:
+            type: string
+            format: date
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/ArtifactType'
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Verified artifacts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifiedArtifactListResponse'
+
+  /verified/artifacts/{artifact_id}/validate:
+    post:
+      tags: [ComplieDocs]
+      operationId: validateArtifact
+      summary: Validate artifact before use
+      description: |
+        Validate an artifact's hash before using it in ComplieDocs.
+        
+        Use this to ensure the artifact hasn't been tampered with
+        since it was verified.
+      security:
+        - serviceAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_hash]
+              properties:
+                expected_hash:
+                  type: string
+                  example: "sha256:7b3d9f..."
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                  artifact_id:
+                    type: string
+                  status:
+                    $ref: '#/components/schemas/ArtifactStatus'
+                  last_verified:
+                    type: string
+                    format: date-time
+
+  # ===========================================================================
+  # EXPORT
+  # ===========================================================================
+  /export/regulator-package:
+    post:
+      tags: [Export]
+      operationId: createRegulatorPackage
+      summary: Create regulator audit package
+      description: |
+        Create a complete audit package for regulators.
+        
+        **Includes:**
+        - All verified artifacts in period
+        - All approval decisions
+        - X-Vault evidence chain
+        - Offline verification instructions
+        - Merkle proofs
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegulatorPackageRequest'
+      responses:
+        '201':
+          description: Package created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegulatorPackageResponse'
+
+components:
+  # ===========================================================================
+  # SECURITY SCHEMES
+  # ===========================================================================
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase JWT token
+    serviceAuth:
+      type: http
+      scheme: bearer
+      description: Service-to-service token for ComplieDocs
+
+  # ===========================================================================
+  # PARAMETERS
+  # ===========================================================================
+  parameters:
+    ArtifactId:
+      name: artifact_id
+      in: path
+      required: true
+      description: Artifact ID (e.g., KNOWLEDGE-2026-014)
+      schema:
+        type: string
+        pattern: '^[A-Z]+-\d{4}-[A-Z0-9]+$'
+      example: KNOWLEDGE-2026-014
+
+    ApproverId:
+      name: X-EVE-Approver-ID
+      in: header
+      required: true
+      description: Approver identifier from registry
+      schema:
+        type: string
+        pattern: '^key:[a-z0-9_]+$'
+      example: "key:founder_joakim"
+
+  # ===========================================================================
+  # RESPONSES
+  # ===========================================================================
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: ARTIFACT_NOT_FOUND
+            message: "Artifact does not exist"
+
+  # ===========================================================================
+  # SCHEMAS
+  # ===========================================================================
+  schemas:
+    # -------------------------------------------------------------------------
+    # ENUMS
+    # -------------------------------------------------------------------------
+    ArtifactType:
+      type: string
+      enum: [knowledge, rule, template, code, workflow]
+      description: Type of artifact
+
+    ArtifactStatus:
+      type: string
+      enum: [draft, submitted, approved, verified, superseded, revoked]
+      description: |
+        Artifact lifecycle status.
+        
+        State machine: `draft → submitted → approved → verified → superseded`
+
+    ApproverRole:
+      type: string
+      enum: [founder, legal_reviewer, technical_reviewer, compliance_officer]
+
+    IdentityStrength:
+      type: string
+      enum: [founder_approved, organization_idp, bankid_se, eidas_substantial, eidas_high]
+      description: |
+        Identity verification strength.
+        
+        Can be upgraded without invalidating previous approvals.
+
+    # -------------------------------------------------------------------------
+    # ARTIFACT
+    # -------------------------------------------------------------------------
+    Artifact:
+      type: object
+      required:
+        - artifact_id
+        - type
+        - version
+        - title
+        - content
+        - content_hash
+        - status
+        - source
+        - created_at
+        - updated_at
+      properties:
+        artifact_id:
+          type: string
+          example: "KNOWLEDGE-2026-014"
+        type:
+          $ref: '#/components/schemas/ArtifactType'
+        version:
+          type: string
+          example: "v1"
+        title:
+          type: string
+          example: "AI Act Article 14 - Human Oversight"
+        content:
+          type: object
+          additionalProperties: true
+        content_hash:
+          type: string
+          example: "sha256:7b3d9f..."
+        status:
+          $ref: '#/components/schemas/ArtifactStatus'
+        source:
+          $ref: '#/components/schemas/ArtifactSource'
+        approval:
+          $ref: '#/components/schemas/ApprovalRef'
+        x_vault:
+          $ref: '#/components/schemas/XVaultRef'
+        lineage:
+          $ref: '#/components/schemas/Lineage'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        verified_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ArtifactSource:
+      type: object
+      required: [origin, author, created_at]
+      properties:
+        origin:
+          type: string
+          enum: [EVE_CONTROL_ROOM, EXTERNAL, MIGRATION]
+        author:
+          type: string
+          format: email
+        created_at:
+          type: string
+          format: date-time
+
+    ApprovalRef:
+      type: object
+      description: |
+        Reference to approval (FAS 5).
+        
+        Set when artifact is approved, before seal.
+      properties:
+        approval_id:
+          type: string
+          format: uuid
+        approver_id:
+          type: string
+          example: "key:founder_joakim"
+        approver_name:
+          type: string
+          example: "Joakim Eklund"
+        role:
+          $ref: '#/components/schemas/ApproverRole'
+        timestamp:
+          type: string
+          format: date-time
+        signature:
+          type: string
+          description: Cryptographic signature (SHA-256)
+
+    XVaultRef:
+      type: object
+      description: |
+        Reference to X-Vault evidence.
+        
+        - `authorization_evidence_id`: Set at approve (FAS 5)
+        - `snapshot_id` + `merkle_root`: Set at seal (FAS 6)
+      properties:
+        authorization_evidence_id:
+          type: string
+          format: uuid
+          description: Evidence ID from approve operation
+        snapshot_id:
+          type: string
+          format: uuid
+          description: Snapshot ID from seal operation
+          nullable: true
+        merkle_root:
+          type: string
+          description: Merkle root at time of seal
+          nullable: true
+
+    Lineage:
+      type: object
+      properties:
+        previous_versions:
+          type: array
+          items:
+            type: string
+        superseded_by:
+          type: string
+          nullable: true
+        supersede_reason:
+          type: string
+          nullable: true
+
+    # -------------------------------------------------------------------------
+    # REQUESTS
+    # -------------------------------------------------------------------------
+    ArtifactSubmitRequest:
+      type: object
+      required: [type, version, title, content, source]
+      properties:
+        type:
+          $ref: '#/components/schemas/ArtifactType'
+        version:
+          type: string
+        title:
+          type: string
+        content:
+          type: object
+          additionalProperties: true
+        source:
+          type: object
+          required: [origin, author]
+          properties:
+            origin:
+              type: string
+              enum: [EVE_CONTROL_ROOM, EXTERNAL]
+            author:
+              type: string
+              format: email
+
+    ApprovalRequest:
+      type: object
+      required: [role, signature]
+      properties:
+        role:
+          $ref: '#/components/schemas/ApproverRole'
+        signature:
+          type: string
+          description: Cryptographic signature of approval
+        notes:
+          type: string
+
+    RejectRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 10
+
+    SupersedeRequest:
+      type: object
+      required: [new_artifact_id, reason]
+      properties:
+        new_artifact_id:
+          type: string
+        reason:
+          type: string
+
+    GrantAccessRequest:
+      type: object
+      required: [name, email, roles]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApproverRole'
+        notes:
+          type: string
+
+    RegulatorPackageRequest:
+      type: object
+      required: [period_start, period_end]
+      properties:
+        period_start:
+          type: string
+          format: date
+        period_end:
+          type: string
+          format: date
+        include_evidence:
+          type: boolean
+          default: true
+        include_offline_verification:
+          type: boolean
+          default: true
+
+    # -------------------------------------------------------------------------
+    # RESPONSES
+    # -------------------------------------------------------------------------
+    ArtifactSubmitResponse:
+      type: object
+      properties:
+        artifact_id:
+          type: string
+        status:
+          type: string
+          enum: [submitted]
+        content_hash:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    ApprovalResult:
+      type: object
+      description: |
+        Result from approve operation (FAS 5).
+        
+        Note: `snapshot_id` is NOT included - that's created by seal.
+      properties:
+        approval_id:
+          type: string
+          format: uuid
+        artifact_id:
+          type: string
+        artifact_hash:
+          type: string
+        approver_id:
+          type: string
+        approver_name:
+          type: string
+        role:
+          $ref: '#/components/schemas/ApproverRole'
+        timestamp:
+          type: string
+          format: date-time
+        signature:
+          type: string
+        x_vault_evidence_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [approved]
+
+    SealResult:
+      type: object
+      description: |
+        Result from seal operation (FAS 6).
+        
+        This creates the snapshot and merkle root.
+      properties:
+        artifact_id:
+          type: string
+        snapshot_id:
+          type: string
+          format: uuid
+        merkle_root:
+          type: string
+        sealed_at:
+          type: string
+          format: date-time
+        x_vault_evidence_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [verified]
+
+    RejectResult:
+      type: object
+      properties:
+        rejection_id:
+          type: string
+          format: uuid
+        artifact_id:
+          type: string
+        rejected_by:
+          type: string
+        reason:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    SupersedeResult:
+      type: object
+      properties:
+        supersede_id:
+          type: string
+          format: uuid
+        old_artifact:
+          type: string
+        new_artifact:
+          type: string
+        reason:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    VerifyResult:
+      type: object
+      properties:
+        artifact_id:
+          type: string
+        valid:
+          type: boolean
+        checks:
+          type: object
+          properties:
+            status_verified:
+              type: boolean
+            content_hash_valid:
+              type: boolean
+            approval_exists:
+              type: boolean
+            approval_signed:
+              type: boolean
+            approver_authorized:
+              type: boolean
+            snapshot_exists:
+              type: boolean
+            merkle_root_exists:
+              type: boolean
+            invariants_valid:
+              type: boolean
+        verified_at:
+          type: string
+          format: date-time
+        approver:
+          type: string
+        merkle_root:
+          type: string
+
+    TrustChain:
+      type: object
+      properties:
+        artifact:
+          type: object
+          properties:
+            artifact_id:
+              type: string
+            status:
+              $ref: '#/components/schemas/ArtifactStatus'
+            verified_at:
+              type: string
+              format: date-time
+        approval:
+          $ref: '#/components/schemas/ApprovalRef'
+        approver_chain:
+          type: array
+          items:
+            type: object
+            properties:
+              approver_id:
+                type: string
+              name:
+                type: string
+              granted_by:
+                type: string
+              identity_strength:
+                $ref: '#/components/schemas/IdentityStrength'
+        x_vault:
+          $ref: '#/components/schemas/XVaultRef'
+        root_of_trust:
+          type: string
+          example: "key:founder_joakim"
+
+    Approver:
+      type: object
+      properties:
+        approver_id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApproverRole'
+        identity_strength:
+          $ref: '#/components/schemas/IdentityStrength'
+        can_verify_trinity:
+          type: boolean
+        granted_by:
+          type: string
+        granted_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    ApproverListResponse:
+      type: object
+      properties:
+        approvers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Approver'
+        root_of_trust:
+          type: string
+
+    ArtifactListResponse:
+      type: object
+      properties:
+        artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    VerifiedArtifactListResponse:
+      type: object
+      properties:
+        artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    RegulatorPackageResponse:
+      type: object
+      properties:
+        package_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date
+            end:
+              type: string
+              format: date
+        contents:
+          type: object
+          properties:
+            verified_artifacts:
+              type: integer
+            approval_decisions:
+              type: integer
+            rejections:
+              type: integer
+            snapshots:
+              type: integer
+        merkle_root:
+          type: string
+        download_url:
+          type: string
+          format: uri
+        verification_instructions:
+          type: string
+          format: uri
+
+    Pagination:
+      type: object
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum:
+            - ARTIFACT_NOT_FOUND
+            - INVALID_STATE_TRANSITION
+            - VERIFICATION_DENIED
+            - INVALID_SIGNATURE
+            - SEAL_PRECONDITION_FAILED
+            - ALREADY_VERIFIED
+            - FOUNDER_REQUIRED
+            - INVARIANT_VIOLATION
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
