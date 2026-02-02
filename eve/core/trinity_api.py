@@ -62,6 +62,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
+# Project Registry (read-only metadata)
+try:
+    from project_registry import list_all_projects, get_project_metadata, ProjectMetadata, ProjectListResponse
+    PROJECT_REGISTRY_AVAILABLE = True
+except ImportError:
+    PROJECT_REGISTRY_AVAILABLE = False
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -985,6 +992,41 @@ async def get_approval(item_id: str, type: Optional[str] = None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PROJECT REGISTRY (read-only metadata)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/projects")
+async def list_projects():
+    """
+    List all registered projects.
+    
+    Returns read-only metadata. No filtering, no mutations.
+    This is system metadata, not governance.
+    """
+    if not PROJECT_REGISTRY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Project Registry not available")
+    
+    return list_all_projects()
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project(project_id: str):
+    """
+    Get a single project by ID.
+    
+    Returns 404 if not found.
+    """
+    if not PROJECT_REGISTRY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Project Registry not available")
+    
+    project = get_project_metadata(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+    
+    return ProjectMetadata(**project)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1009,6 +1051,10 @@ if __name__ == "__main__":
     print("    GET  /decisions       — List decisions")
     print("    GET  /status          — System status")
     print("    GET  /artifacts       — List artifacts")
+    print()
+    print("  Project Registry (read-only):")
+    print("    GET  /api/projects         — List all projects")
+    print("    GET  /api/projects/{id}    — Get single project")
     print()
     print("═" * 70)
     print("  Open in browser: http://127.0.0.1:8000")

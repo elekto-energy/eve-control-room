@@ -1,0 +1,34 @@
+[
+  {
+    "project_id": "legacy",
+    "label": "Legacy (v1)",
+    "project_class": "system",
+    "trust_tier": "T0",
+    "description": "Backward-compatible v1 mode",
+    "locked": true
+  },
+  {
+    "project_id": "compliedocs-core",
+    "label": "ComplieDocs – Compliance",
+    "project_class": "legal",
+    "trust_tier": "T3",
+    "description": "Regulatory compliance verification",
+    "locked": true
+  },
+  {
+    "project_id": "medical-core",
+    "label": "Medical Evidence – Core",
+    "project_class": "medical",
+    "trust_tier": "T3",
+    "description": "Clinical-grade verified medical knowledge",
+    "locked": true
+  },
+  {
+    "project_id": "elekto-marina",
+    "label": "ELEKTO Marina",
+    "project_class": "energy",
+    "trust_tier": "T2",
+    "description": "Energy tokenization for marinas",
+    "locked": false
+  }
+]
